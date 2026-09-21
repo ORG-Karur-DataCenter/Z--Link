@@ -25,7 +25,9 @@
  * someone's library.
  */
 import {
-  Document, biblioEndIndex, countCitations, findBiblioIndex, hasImages, makeRenderer, markBody,
+  DEFAULT_STYLE,
+  Document, biblioEndIndex, countCitations, findBiblioIndex, hasImages, insertBibliography,
+  makeRenderer, markBody,
   markBodyFields, parseBibliography, removeRange,
 } from './docx.js';
 import { parseReference } from './extractor.js';
@@ -132,6 +134,7 @@ export async function resolve(file, opts, cb = {}) {
 export async function finish(state, opts, cb = {}) {
   const {
     mailto = 'you@example.com', userid = '', apiKey = '', signal = null,
+    citationStyle = DEFAULT_STYLE,
   } = opts;
   const onStage = cb.onStage || (() => {});
   const onProgress = cb.onProgress || (() => {});
@@ -210,10 +213,28 @@ export async function finish(state, opts, cb = {}) {
     // it after marking nothing would hand back a manuscript with no citations
     // and no bibliography either.
     if (!usedPastedBibliography && n) {
-      removeRange(doc, biblioIdx, biblioEndIndex(doc, biblioIdx));
+      const end = biblioEndIndex(doc, biblioIdx);
+      // Both read before the removal: the heading carries the style the rebuilt
+      // one should match, and the paragraph after the list is where the
+      // bibliography field belongs.
+      const paras = doc.paragraphs;
+      const headingProto = paras[biblioIdx] ? paras[biblioIdx].el : null;
+      const anchor = paras[end] ? paras[end].el : null;
+      removeRange(doc, biblioIdx, end);
+      // Only the field document gets one. The Scannable Cite copy is finished by
+      // ODF Scan, which builds the bibliography itself.
+      if (style === 'fields') insertBibliography(doc, anchor, headingProto);
     } else if (!usedPastedBibliography && style === 'fields') {
       warnings.push('No citations were rewritten, so the bibliography has been left in place.');
+    } else if (usedPastedBibliography && n && style === 'fields') {
+      // The reference list was pasted rather than in the file, so there is
+      // nothing to replace — the bibliography goes at the end.
+      insertBibliography(doc, null, null);
     }
+    // The preferences say which style to render in and that the references
+    // travel inside the citations. Without them Zotero stops to ask, on a
+    // machine that is not the author's, a question the author already answered.
+    if (style === 'fields') doc.setZoteroPrefs(citationStyle);
     built[style] = await doc.save();
     if (style === 'fields') {
       nMarked = n;

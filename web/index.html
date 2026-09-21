@@ -123,10 +123,11 @@ button{font-family:var(--mono);cursor:pointer;border-radius:0;transition:all .18
 .linklike{background:none;border:0;padding:0;color:var(--amber);font-family:var(--serif);
   font-size:inherit;font-style:italic;text-decoration:underline;text-underline-offset:2px}
 .linklike:hover{color:var(--amber-2)}
-input[type=text],input[type=password],input[type=email],textarea{
+input[type=text],input[type=password],input[type=email],textarea,select{
   width:100%;background:#FFFEFC;border:1px solid var(--rule-2);color:var(--ink);
   font-family:var(--mono);font-size:.86rem;padding:.62rem .75rem;border-radius:0}
-input:focus,textarea:focus{outline:none;border-color:var(--amber);background:#fff}
+select{appearance:none;cursor:pointer}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--amber);background:#fff}
 input::placeholder{color:#B5AB99}
 .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1.1rem}
 .writes{margin-top:1.3rem;border:1px solid var(--rule);border-left:2px solid var(--amber);
@@ -357,6 +358,19 @@ footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--rule);
         <input type="email" id="mailto" placeholder="you@lab.org" autocomplete="off" spellcheck="false">
         <p class="note">Identifies you to the Crossref and NCBI polite pools, which grant higher
           rate limits and make the run faster. Not sent anywhere else.</p>
+      </div>
+      <div class="field">
+        <label for="style">Citation style</label>
+        <select id="style">
+          <option value="http://www.zotero.org/styles/vancouver-superscript" selected>Vancouver (superscript) — NLM/ICMJE</option>
+          <option value="http://www.zotero.org/styles/vancouver">Vancouver (brackets)</option>
+          <option value="http://www.zotero.org/styles/national-library-of-medicine">National Library of Medicine</option>
+          <option value="http://www.zotero.org/styles/american-medical-association">AMA (JAMA)</option>
+          <option value="http://www.zotero.org/styles/apa">APA 7th</option>
+        </select>
+        <p class="note">Written into the document, so anyone who opens it in Word with Zotero
+          running gets this style without being asked to choose one. Changeable afterwards in
+          Zotero&rsquo;s Document Preferences.</p>
       </div>
       <p class="writes"><b>Every run adds items to your Zotero library.</b> Items already in your
         library are reused and never duplicated, and only references that resolved are added.</p>

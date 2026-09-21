@@ -188,6 +188,43 @@ export class Document {
     return out;
   }
 
+  /** The text of one part, or null when the package has no such part. */
+  part(name) {
+    const e = this.entries.find((x) => x.name === name);
+    return e ? new TextDecoder('utf-8').decode(e.data) : null;
+  }
+
+  /**
+   * Replace a part, or add it when the package has none.
+   *
+   * A new part goes on the end. Order within the archive is free except for
+   * [Content_Types].xml, which must come first and is only ever replaced here,
+   * never added.
+   */
+  setPart(name, text) {
+    const data = new TextEncoder().encode(text);
+    const at = this.entries.findIndex((x) => x.name === name);
+    if (at >= 0) this.entries[at] = { ...this.entries[at], data };
+    else this.entries.push({ name, data, method: 8, mtime: 0, mdate: 0x21 });
+  }
+
+  /**
+   * Write the Zotero document preferences into the package.
+   *
+   * Three parts move together, which is why this is one call: the properties
+   * themselves, the content-type declaration that makes the part readable, and
+   * the package relationship that makes it reachable. A file carrying only the
+   * first two is one Word opens and silently ignores.
+   */
+  setZoteroPrefs(styleId = DEFAULT_STYLE, sessionId = randomCitationId()) {
+    const chunks = prefChunks(zoteroPrefs(styleId, sessionId));
+    this.setPart(CUSTOM_PART, customPropertiesXml(this.part(CUSTOM_PART), chunks));
+    const types = this.part('[Content_Types].xml');
+    if (types) this.setPart('[Content_Types].xml', withCustomContentType(types));
+    const rels = this.part('_rels/.rels');
+    if (rels) this.setPart('_rels/.rels', withCustomRelationship(rels));
+  }
+
   async save() {
     const xmlText = new XMLSerializer().serializeToString(this.xml);
     const data = new TextEncoder().encode(xmlText);
@@ -195,6 +232,62 @@ export class Document {
       e.name === 'word/document.xml' ? { ...e, data } : e
     ));
     return writeZip(entries);
+  }
+}
+
+/**
+ * Put a heading and a Zotero bibliography field where the reference list was.
+ *
+ * `anchor` is the paragraph the bibliography goes before — the first one that
+ * outlived the removed reference list — or null to place it at the end of the
+ * body. Not simply appending matters: a body usually ends with a `sectPr`
+ * carrying the page setup, and anything after that element is out of the
+ * document's flow.
+ *
+ * `headingProto` is the original "References" paragraph, read before it was
+ * removed. Reusing its `pPr` keeps the manuscript's own heading style, so the
+ * rebuilt list sits under a heading that matches every other heading in the
+ * document rather than under Word's default.
+ */
+export function insertBibliography(doc, anchor, headingProto, heading = 'References') {
+  const xml = doc.xml;
+  const body = doc.body;
+  if (!body) return;
+
+  const headP = xml.createElementNS(W, 'w:p');
+  if (headingProto) {
+    for (const child of headingProto.childNodes) {
+      if (child.nodeType === 1 && child.namespaceURI === W && child.localName === 'pPr') {
+        headP.appendChild(child.cloneNode(true));
+        break;
+      }
+    }
+  }
+  const hr = xml.createElementNS(W, 'w:r');
+  const ht = xml.createElementNS(W, 'w:t');
+  ht.setAttributeNS(XML_NS, 'xml:space', 'preserve');
+  ht.textContent = heading;
+  hr.appendChild(ht);
+  headP.appendChild(hr);
+
+  const biblP = xml.createElementNS(W, 'w:p');
+  for (const r of fieldRuns(xml, BIBL_INSTRUCTION, BIBL_PLACEHOLDER, null)) biblP.appendChild(r);
+
+  let before = anchor;
+  if (!before) {
+    for (const child of body.childNodes) {
+      if (child.nodeType === 1 && child.namespaceURI === W && child.localName === 'sectPr') {
+        before = child;
+        break;
+      }
+    }
+  }
+  if (before) {
+    body.insertBefore(headP, before);
+    body.insertBefore(biblP, before);
+  } else {
+    body.appendChild(headP);
+    body.appendChild(biblP);
   }
 }
 
@@ -585,6 +678,155 @@ export function citationJson(items, uid, id) {
   });
 }
 
+// --- document preferences and the bibliography field ---------------------------
+//
+// A Zotero document is more than its citation fields. Two other things travel
+// with it, and without them a reader who is not the author sees a manuscript
+// that looks broken:
+//
+//   - the document preferences: which citation style to render in, and how the
+//     citations are stored. Zotero keeps these in the Word *custom document
+//     properties* ZOTERO_PREF_1, ZOTERO_PREF_2, … — not in a field, which is why
+//     they are invisible in the text and why they are capped at 255 characters
+//     each. Without them Zotero treats the document as never having been set up
+//     and stops to ask, on someone else's machine, a question the author already
+//     answered.
+//
+//   - the bibliography field. Z-Link removes the typed reference list, because
+//     the citations now carry their own records — but nothing was putting a
+//     Zotero bibliography in its place, so the reader was left with citations
+//     and no reference list at all.
+
+/**
+ * The style every document is set up in unless asked otherwise.
+ *
+ * Vancouver (superscript) is the NLM/ICMJE numbered style with superscript
+ * in-text markers — the notation most of these manuscripts already use, so a
+ * refresh reproduces what the author typed rather than reformatting it.
+ */
+export const DEFAULT_STYLE = 'http://www.zotero.org/styles/vancouver-superscript';
+
+/**
+ * The preferences payload Zotero stores.
+ *
+ * `storeReferences` is true because every citation here embeds its own
+ * `itemData`; saying so lets Zotero use the embedded record rather than hunting
+ * for an item it will not find in the reader's library.
+ *
+ * `automaticJournalAbbreviations` is false deliberately. Turning it on makes
+ * Zotero derive abbreviations from the full journal title and ignore the
+ * `journalAbbreviation` field — which is exactly the field the resolver fills
+ * from Crossref and PubMed, where the abbreviations are the real ones.
+ *
+ * No `zotero-version` attribute: this document was not written by a Zotero
+ * release, and naming one would be a claim about provenance that isn't true.
+ * Zotero fills it in the first time it saves the document.
+ */
+export function zoteroPrefs(styleId = DEFAULT_STYLE, sessionId = randomCitationId()) {
+  return '<data data-version="3">'
+    + `<session id="${sessionId}"/>`
+    + `<style id="${styleId}" hasBibliography="1" bibliographyStyleHasBeenSet="0"/>`
+    + '<prefs>'
+    + '<pref name="fieldType" value="Field"/>'
+    + '<pref name="storeReferences" value="true"/>'
+    + '<pref name="automaticJournalAbbreviations" value="false"/>'
+    + '<pref name="noteType" value="0"/>'
+    + '</prefs>'
+    + '</data>';
+}
+
+// A Word custom document property holds at most 255 characters, which is the
+// only reason the preferences are numbered rather than stored whole.
+const PREF_CHUNK = 255;
+
+export function prefChunks(data) {
+  const out = [];
+  for (let i = 0; i < data.length; i += PREF_CHUNK) out.push(data.slice(i, i + PREF_CHUNK));
+  return out;
+}
+
+const XML_ESCAPE = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => XML_ESCAPE[c]);
+
+const CUSTOM_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/custom-properties';
+const VT_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes';
+const CUSTOM_PART = 'docProps/custom.xml';
+const CUSTOM_TYPE = 'application/vnd.openxmlformats-officedocument.custom-properties+xml';
+const CUSTOM_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties';
+// Every custom property in an OOXML package carries this fmtid; it is a fixed
+// constant, not an identifier of this document.
+const FMTID = '{D5CDD505-2E9C-101B-9397-08002B2CF9AE}';
+
+/**
+ * The custom-properties part, with the Zotero preferences written into it.
+ *
+ * Any properties the manuscript already had are kept — a document may well
+ * carry a journal's or an institution's own metadata, and dropping it to write
+ * ours would be a silent edit nobody asked for. Only previous ZOTERO_PREF_*
+ * entries are replaced, so re-running a document does not leave two
+ * generations of preferences behind.
+ */
+export function customPropertiesXml(existingXml, chunks) {
+  // Properties this document already had are carried across as the exact text
+  // they arrived as, rather than being parsed and written back out. A
+  // round trip through the DOM is not lossless — it moves namespace
+  // declarations around and can rewrite a typed value — and a journal's or an
+  // institution's metadata is not ours to reformat on the way past.
+  const kept = [];
+  let maxPid = 1;
+  if (existingXml) {
+    for (const m of existingXml.matchAll(/<property\b[^>]*?(?:\/>|>[\s\S]*?<\/property>)/g)) {
+      const text = m[0];
+      const name = /\bname="([^"]*)"/.exec(text);
+      if (name && /^ZOTERO_PREF_\d+$/.test(name[1])) continue;
+      const pid = /\bpid="(\d+)"/.exec(text);
+      if (pid) maxPid = Math.max(maxPid, Number(pid[1]));
+      kept.push(text);
+    }
+  }
+
+  // pids number the properties within the part, start at 2, and must not
+  // repeat — so ours continue past the highest one already in use.
+  let pid = maxPid + 1;
+  const parts = [...kept];
+  for (const [i, chunk] of chunks.entries()) {
+    parts.push(`<property fmtid="${FMTID}" pid="${pid++}" name="ZOTERO_PREF_${i + 1}">`
+      + `<vt:lpwstr>${esc(chunk)}</vt:lpwstr></property>`);
+  }
+
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + `<Properties xmlns="${CUSTOM_NS}" xmlns:vt="${VT_NS}">${parts.join('')}</Properties>`;
+}
+
+/** Register docProps/custom.xml in [Content_Types].xml, if it isn't already. */
+export function withCustomContentType(xml) {
+  if (xml.includes(`PartName="/${CUSTOM_PART}"`)) return xml;
+  return xml.replace(/<\/Types>\s*$/,
+    `<Override PartName="/${CUSTOM_PART}" ContentType="${CUSTOM_TYPE}"/></Types>`);
+}
+
+/** Point the package at docProps/custom.xml, if it doesn't already. */
+export function withCustomRelationship(xml) {
+  if (xml.includes(`Target="${CUSTOM_PART}"`) || xml.includes(`Target="/${CUSTOM_PART}"`)) return xml;
+  let next = 1;
+  for (const m of xml.matchAll(/Id="rId(\d+)"/g)) next = Math.max(next, Number(m[1]) + 1);
+  return xml.replace(/<\/Relationships>\s*$/,
+    `<Relationship Id="rId${next}" Type="${CUSTOM_REL}" Target="${CUSTOM_PART}"/></Relationships>`);
+}
+
+/**
+ * The bibliography field: one Word field whose body Zotero fills on refresh.
+ *
+ * The placeholder text matters. Until someone refreshes, the field shows
+ * whatever is inside it — so it says what to do rather than sitting there
+ * empty and looking like the reference list was simply lost.
+ */
+export const BIBL_INSTRUCTION =
+  ' ADDIN ZOTERO_BIBL {"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY ';
+
+export const BIBL_PLACEHOLDER =
+  '[Reference list: in Word, with Zotero running, click Refresh on the Zotero tab.]';
+
 /** A `w:r` carrying one `w:fldChar`. */
 function fldCharRun(xml, type) {
   const r = xml.createElementNS(W, 'w:r');
@@ -601,7 +843,7 @@ function fldCharRun(xml, type) {
  * the manuscript's font rather than Word's default — minus any superscript,
  * which belongs to the notation being replaced and not to the citation.
  */
-function fieldRuns(xml, json, label, rPr) {
+function fieldRuns(xml, instruction, label, rPr) {
   const runs = [fldCharRun(xml, 'begin')];
 
   const instr = xml.createElementNS(W, 'w:r');
@@ -609,7 +851,7 @@ function fieldRuns(xml, json, label, rPr) {
   it.setAttributeNS(XML_NS, 'xml:space', 'preserve');
   // textContent escapes for us, which is the whole point: the JSON is data, and
   // a title containing "<" must not become markup.
-  it.textContent = ` ADDIN ZOTERO_ITEM CSL_CITATION ${json} `;
+  it.textContent = instruction;
   instr.appendChild(it);
   runs.push(instr, fldCharRun(xml, 'separate'));
 
@@ -687,7 +929,8 @@ function applyPieces(p, replacements) {
     const frag = xml.createDocumentFragment();
     for (const piece of pieces) {
       if (piece.kind === 'field') {
-        for (const r of fieldRuns(xml, piece.json, piece.label, rPr)) frag.appendChild(r);
+        const instr = ` ADDIN ZOTERO_ITEM CSL_CITATION ${piece.json} `;
+        for (const r of fieldRuns(xml, instr, piece.label, rPr)) frag.appendChild(r);
       } else {
         frag.appendChild(textRun(xml, piece.value, rPr));
       }

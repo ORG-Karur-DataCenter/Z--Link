@@ -34,6 +34,10 @@ HARNESSES = [
     ("extractor", ["extractor_parity.py"]),
     ("scorer", ["scorer_parity.py"]),
     ("detached", ["detached_parity.py"]),
+    # Not a parity harness: the document preferences and packaging exist only in
+    # the browser engine. It runs here because this is the command that gates the
+    # deploy, and a document Zotero cannot set up is not a shippable one.
+    ("zotero doc", ["zotero_doc_check.py"]),
 ]
 
 

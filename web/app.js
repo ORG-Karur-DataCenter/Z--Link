@@ -24,7 +24,7 @@ const els = {
   uid: $('uid'), key: $('key'), mailto: $('mailto'),
   go: $('go'), cancel: $('cancel'), mode: $('mode'), credHint: $('credHint'),
   err: $('err'), errMsg: $('errMsg'),
-  progress: $('progress'), stage: $('stage'), count: $('count'), bar: $('bar'),
+  progress: $('progress'), stage: $('stage'), count: $('count'), bar: $('bar'), style: $('style'),
   results: $('results'), downloads: $('downloads'), rows: $('rows'),
   tTotal: $('tTotal'), tOk: $('tOk'), tRev: $('tRev'), tMark: $('tMark'),
   tAdded: $('tAdded'), kAdded: $('kAdded'),
@@ -62,6 +62,7 @@ function loadCreds() {
   els.uid.value = saved.userid || '';
   els.key.value = saved.apiKey || '';
   els.mailto.value = saved.mailto || '';
+  if (saved.citationStyle) els.style.value = saved.citationStyle;
   refreshCreds();
 }
 
@@ -70,9 +71,13 @@ function saveCreds() {
     userid: els.uid.value.trim(),
     apiKey: els.key.value.trim(),
     mailto: els.mailto.value.trim(),
+    citationStyle: els.style.value,
   };
   try {
-    if (Object.values(payload).some(Boolean)) localStorage.setItem(STORE, JSON.stringify(payload));
+    // The style always has a value, so it cannot decide whether there is
+    // anything worth keeping — only the credentials can.
+    const anyCreds = [payload.userid, payload.apiKey, payload.mailto].some(Boolean);
+    if (anyCreds) localStorage.setItem(STORE, JSON.stringify(payload));
     else localStorage.removeItem(STORE);
     localStorage.removeItem(LEGACY_STORE);
   } catch {
@@ -517,6 +522,7 @@ els.go.addEventListener('click', async () => {
       mailto: els.mailto.value.trim() || 'you@example.com',
       userid: els.uid.value.trim(),
       apiKey: els.key.value.trim(),
+      citationStyle: els.style.value,
       workers: WORKERS,
       signal: controller.signal,
     };

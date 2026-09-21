@@ -60,9 +60,17 @@ python -m zotprep --manuscript paper.docx</code></pre>
 </tr>
 </table>
 
-Then open the `.docx` in Word. The citations are Zotero field codes: Zotero asks for a
-citation style the first time you refresh them, and **Add/Edit Bibliography** rebuilds the
-reference list in that style.
+Then open the `.docx` in Word and press **Refresh** on the Zotero tab. The citations are
+Zotero field codes, the document already carries the citation style you chose — Vancouver
+(superscript) unless you changed it — and the reference list rebuilds itself in place, so
+there is nothing to set up and no style to pick.
+
+That holds on anyone's machine, not only yours. Each citation embeds the full reference
+rather than a link into the library it came from, and the style and the bibliography travel
+with the document, so a co-author or a supervisor who opens the file gets the same
+manuscript you do. What they need is Word on the desktop with Zotero running: Word Online,
+Google Docs and Pages have no Zotero plugin, and Word installed from the Microsoft Store
+blocks it.
 
 <sub>A Scannable Cite copy for the <b>ODF Scan</b> plugin is produced alongside, for
 LibreOffice or for checking the markers before they become citations — the plugin is
