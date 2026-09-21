@@ -19,6 +19,33 @@ import * as crossref from './search/crossref.js';
 
 const API = 'https://api.zotero.org';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The per-attempt deadline, plus the run's own cancel signal where the browser
+ * can combine them. Without AbortSignal.any the deadline still applies; Cancel
+ * then takes effect between attempts rather than during one.
+ */
+function deadline(ms, signal) {
+  const timer = AbortSignal.timeout(ms);
+  if (!signal) return timer;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, timer]);
+  return timer;
+}
+
+/**
+ * A Zotero write token: 32 hex characters identifying one logical write.
+ *
+ * Zotero ignores a repeat of a write it has already seen under the same token,
+ * so a POST whose reply was lost can be sent again without the chunk landing in
+ * the library twice.
+ */
+function writeToken() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
 /** Full names where the provider record has them; surnames otherwise. */
 function creatorsFromRaw(cand) {
   const raw = (cand.raw && typeof cand.raw === 'object' && !Array.isArray(cand.raw)) ? cand.raw : {};
@@ -149,12 +176,13 @@ export async function enrich(cand, mailto, opts = {}) {
  * guess in someone's library.
  */
 export class ZoteroWriter {
-  constructor(userid, apiKey, { onLog = null } = {}) {
+  constructor(userid, apiKey, { onLog = null, signal = null } = {}) {
     this.userid = userid;
     this.apiKey = apiKey;
     this.byDoi = new Map();
     this.byTitle = new Map();
     this.log = onLog || (() => {});
+    this.signal = signal;
   }
 
   get headers() {
@@ -163,6 +191,70 @@ export class ZoteroWriter {
       'Zotero-API-Version': '3',
       'Content-Type': 'application/json',
     };
+  }
+
+  /**
+   * One request to api.zotero.org, retried on the failures that pass.
+   *
+   * Every call here lands at the end of a run that has already spent minutes
+   * resolving references, and on a link the provider searches have usually
+   * shown can drop requests. A single `AbortSignal.timeout` with nothing behind
+   * it therefore throws the whole run away for one slow response — and throws
+   * it away as `signal timed out`, which is only Chrome's wording for that
+   * DOMException and says nothing about which step stopped or whether anything
+   * reached the library.
+   *
+   * So: a slow or dropped response is retried with growing backoff, Zotero's
+   * own `Backoff` and `Retry-After` headers are obeyed rather than ignored, and
+   * what finally escapes names the step it came from.
+   */
+  async request(url, {
+    what, method = 'GET', body = null, headers = null, timeout = 30000, attempts = 4,
+  }) {
+    let delay = 2000;
+    let reason = '';
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let res = null;
+      try {
+        res = await fetch(url, {
+          method,
+          headers: { ...this.headers, ...(headers || {}) },
+          body,
+          signal: deadline(timeout, this.signal),
+        });
+      } catch (e) {
+        if (this.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+        reason = e?.name === 'TimeoutError'
+          ? `no reply within ${Math.round(timeout / 1000)}s`
+          : `the connection failed (${e?.message || e})`;
+      }
+
+      if (res) {
+        // 429 and 5xx are Zotero asking for time, not refusing the work.
+        const retryable = res.status === 429 || res.status >= 500;
+        if (!retryable) {
+          const backoff = Number(res.headers.get('Backoff') || 0);
+          if (backoff > 0) await sleep(Math.min(backoff, 30) * 1000);
+          return res;
+        }
+        reason = `Zotero answered HTTP ${res.status}`;
+        const after = Number(res.headers.get('Retry-After') || res.headers.get('Backoff') || 0);
+        if (after > 0) delay = Math.min(after, 60) * 1000;
+      }
+
+      if (attempt === attempts) break;
+      this.log('warn', `Zotero: ${reason} while ${what} — retrying in `
+        + `${Math.round(delay / 1000)}s (attempt ${attempt + 1} of ${attempts}).`);
+      await sleep(delay + Math.random() * 400);
+      delay = Math.min(delay * 2, 30000);
+      if (this.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+    }
+
+    throw new Error(`Zotero stopped responding while ${what} — ${reason}, after `
+      + `${attempts} attempts. This is the connection to api.zotero.org rather than anything `
+      + 'wrong with your document or your key; your references are still resolved, so press '
+      + 'the button again and the run will reuse what is already in your library.');
   }
 
   /**
@@ -183,16 +275,9 @@ export class ZoteroWriter {
    * so both are caught up front with a message that says which one it is.
    */
   async verify() {
-    let res;
-    try {
-      res = await fetch(`${API}/keys/current`, {
-        headers: this.headers,
-        signal: AbortSignal.timeout(20000),
-      });
-    } catch (e) {
-      throw new Error(`Could not reach api.zotero.org (${e?.message || e}). `
-        + 'Check your connection, or whether something is blocking the request.');
-    }
+    const res = await this.request(`${API}/keys/current`, {
+      what: 'checking your API key', timeout: 20000, attempts: 3,
+    });
 
     if (res.status === 403 || res.status === 401) {
       throw new Error('Zotero does not recognise that API key. Copy it again from '
@@ -227,11 +312,14 @@ export class ZoteroWriter {
 
   /** Index the existing library once, so duplicate checks are local. */
   async loadLibrary(onProgress = null) {
+    const LIMIT = 100;
+    this.byDoi.clear();
+    this.byTitle.clear();
     let start = 0;
     for (;;) {
-      const res = await fetch(
-        `${API}/users/${encodeURIComponent(this.userid)}/items?start=${start}&limit=100`,
-        { headers: this.headers, signal: AbortSignal.timeout(30000) },
+      const res = await this.request(
+        `${API}/users/${encodeURIComponent(this.userid)}/items?start=${start}&limit=${LIMIT}`,
+        { what: 'indexing your library' },
       );
       if (!res.ok) throw new Error(`Zotero API error ${res.status} while reading the library.`);
       const batch = await res.json();
@@ -249,6 +337,9 @@ export class ZoteroWriter {
       }
       start += batch.length;
       if (onProgress) onProgress(start);
+      // A short page is the last page. Asking for the empty one after it is a
+      // whole extra round trip to api.zotero.org that can only fail.
+      if (batch.length < LIMIT) break;
     }
   }
 
@@ -279,14 +370,41 @@ export class ZoteroWriter {
       if (hit) { keys.set(n, hit); reused++; } else pending.push([n, item]);
     }
 
-    for (let start = 0; start < pending.length; start += 50) {
-      const chunk = pending.slice(start, start + 50);
-      const res = await fetch(`${API}/users/${encodeURIComponent(this.userid)}/items`, {
+    // 50 items is Zotero's maximum for a single write.
+    const CHUNK = 50;
+    for (let start = 0; start < pending.length; start += CHUNK) {
+      const chunk = pending.slice(start, start + CHUNK);
+      const last = Math.min(start + CHUNK, pending.length);
+      // Generated once per chunk, so the retries inside request() are the same
+      // write rather than a second one.
+      const token = writeToken();
+      const res = await this.request(`${API}/users/${encodeURIComponent(this.userid)}/items`, {
+        what: `adding items ${start + 1}-${last} of ${pending.length} to your library`,
         method: 'POST',
-        headers: this.headers,
+        headers: { 'Zotero-Write-Token': token },
         body: JSON.stringify(chunk.map(([, it]) => it)),
-        signal: AbortSignal.timeout(60000),
+        timeout: 90000,
       });
+
+      // Zotero rejects a write token it has already seen. That means the reply
+      // to an earlier attempt was lost rather than the write itself: the items
+      // are in the library, and only their keys are missing. Re-index and look
+      // them up, instead of sending them again and leaving duplicates behind.
+      if (res.status === 412) {
+        this.log('warn', 'The reply to that write was lost, but Zotero had already stored the '
+          + 'items — re-reading the library to find them rather than adding them twice.');
+        await this.loadLibrary();
+        for (const [n, item] of chunk) {
+          const hit = this.existingKey(item);
+          if (hit) { keys.set(n, hit); created++; } else {
+            failed.push([n, 'stored by Zotero, but the item could not be found again']);
+            this.log('warn', `Reference ${n} could not be matched back to a library item.`);
+          }
+        }
+        if (onProgress) onProgress(last, pending.length);
+        continue;
+      }
+
       if (!res.ok) {
         const detail = (await res.text()).slice(0, 300);
         if (res.status === 403) {
@@ -309,7 +427,7 @@ export class ZoteroWriter {
         failed.push([n, msg]);
         this.log('warn', `Reference ${n} was rejected by Zotero: ${msg}`);
       }
-      if (onProgress) onProgress(Math.min(start + 50, pending.length), pending.length);
+      if (onProgress) onProgress(last, pending.length);
     }
     return { keys, created, reused, failed };
   }
