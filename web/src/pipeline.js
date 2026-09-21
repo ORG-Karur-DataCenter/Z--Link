@@ -113,7 +113,7 @@ export async function resolve(file, opts, cb = {}) {
   // in two seconds rather than after several minutes of searching. The document
   // is read first only because reading it is local and instant.
   onStage('verifying Zotero credentials');
-  await new ZoteroWriter(userid, apiKey, { onLog }).verify();
+  await new ZoteroWriter(userid, apiKey, { onLog, signal }).verify();
 
   onStage(`resolving ${refs.size} references`);
   const cache = newCache();
@@ -156,7 +156,7 @@ export async function finish(state, opts, cb = {}) {
     onProgress(++done, accepted.length);
   }
 
-  const writer = new ZoteroWriter(userid, apiKey, { onLog });
+  const writer = new ZoteroWriter(userid, apiKey, { onLog, signal });
   onStage('indexing your Zotero library for duplicates');
   await writer.loadLibrary((n) => onLog('info', `  indexed ${n} items`));
 
